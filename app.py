@@ -1,48 +1,57 @@
 import streamlit as st
 import pandas as pd
+import openpyxl
 import io
 
 st.set_page_config(page_title="NOON Template Filler", layout="wide")
 
 st.title("NOON Information Sheet Generator")
-st.write("Upload your source data and the NOON Information sheet template to map columns and generate the final file.")
+st.write("Upload your source data and the NOON template. The app will preserve all formatting and hidden rows.")
 
-# File uploaders
 col1, col2 = st.columns(2)
 with col1:
     source_file = st.file_uploader("1. Upload Source Data (Excel/CSV)", type=["csv", "xlsx"])
 with col2:
-    template_file = st.file_uploader("2. Upload NOON Template (Excel/CSV)", type=["csv", "xlsx"])
+    # Template must be Excel to contain hidden rows/formatting
+    template_file = st.file_uploader("2. Upload NOON Template (Excel ONLY)", type=["xlsx"])
 
 if source_file and template_file:
-    # Function to read files based on extension
-    @st.cache_data
-    def load_data(file):
-        if file.name.endswith('.csv'):
-            return pd.read_csv(file)
-        else:
-            return pd.read_excel(file)
-
     try:
-        df_source = load_data(source_file)
-        df_template = load_data(template_file)
-        
-        template_headers = list(df_template.columns)
+        # 1. Load the source data
+        if source_file.name.endswith('.csv'):
+            df_source = pd.read_csv(source_file)
+        else:
+            df_source = pd.read_excel(source_file)
+            
         source_headers = list(df_source.columns)
+
+        # 2. Load the NOON template using openpyxl to KEEP formatting
+        wb = openpyxl.load_workbook(template_file)
+        sheet = wb.active # Assumes you want to fill the first sheet
         
+        # 3. Extract headers exactly from Row 8
+        template_headers = []
+        header_col_map = {} # Remembers which column letter each header belongs to
+        
+        for cell in sheet[8]: # openpyxl is 1-indexed, so 8 is row 8
+            if cell.value:
+                header_name = str(cell.value).strip()
+                template_headers.append(header_name)
+                header_col_map[header_name] = cell.column
+
+        if not template_headers:
+            st.error("Could not find any headers in Row 8 of the template.")
+            st.stop()
+
         st.divider()
         st.subheader("Column Mapping")
-        st.write("Match the headers from your source data to the corresponding NOON template headers. The app will auto-match headers with the exact same name.")
+        st.write("Headers extracted from **Row 8**. Data will be inserted starting at **Row 10** (preserving hidden row 9).")
         
-        # Dictionary to store user's mapping choices
         mapping = {}
-        
-        # Option to leave a column empty if no source data matches
         source_options = ["--- Leave Empty ---"] + source_headers
         
-        # Create a selectbox for every header in the template
+        # Create mapping interface
         for header in template_headers:
-            # Auto-select the column if the names match exactly
             default_index = 0
             if header in source_headers:
                 default_index = source_options.index(header)
@@ -57,31 +66,43 @@ if source_file and template_file:
                 mapping[header] = selected_col
             else:
                 mapping[header] = None
-                
-        # Generate the final file
+
+        # 4. Generate the final file
         if st.button("Generate NOON Sheet", type="primary"):
-            # Create an empty dataframe with the NOON template headers
-            df_final = pd.DataFrame(columns=template_headers)
             
-            # Fill in the data based on the mapping
-            for temp_col, source_col in mapping.items():
-                if source_col:  # If a column was mapped
-                    df_final[temp_col] = df_source[source_col]
+            # Start writing data at row 10
+            start_row = 10
             
-            st.success("Data mapped successfully! Preview below:")
-            st.dataframe(df_final.head(10)) # Show preview
+            # Iterate through source data and write directly into the template cells
+            for index, row_data in df_source.iterrows():
+                current_row = start_row + index
+                
+                for temp_header, source_col in mapping.items():
+                    if source_col: 
+                        # Get the exact column index for this header
+                        col_idx = header_col_map[temp_header]
+                        
+                        # Write the data into the cell
+                        val = row_data[source_col]
+                        # Handle pandas NaNs/nulls so they write as blank cells
+                        if pd.isna(val):
+                            val = ""
+                            
+                        sheet.cell(row=current_row, column=col_idx, value=val)
             
-            # Convert final dataframe to an Excel file in memory for download
+            st.success("Data injected successfully! All formatting and hidden rows are preserved.")
+            
+            # Save the modified template into memory
             buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df_final.to_excel(writer, index=False, sheet_name='NOON Info')
+            wb.save(buffer)
+            buffer.seek(0)
             
             st.download_button(
                 label="📥 Download Filled NOON Sheet",
                 data=buffer.getvalue(),
-                file_name="Filled_NOON_Information_Sheet.xlsx",
+                file_name="Filled_NOON_Template.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
     except Exception as e:
-        st.error(f"An error occurred while processing the files: {e}")
+        st.error(f"An error occurred: {e}")
