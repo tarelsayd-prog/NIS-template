@@ -2,23 +2,24 @@ import streamlit as st
 import pandas as pd
 import openpyxl
 import io
+import difflib
+import re
 
 st.set_page_config(page_title="NOON Template Filler", layout="wide")
 
 st.title("NOON Information Sheet Generator")
-st.write("Upload your Amazon source data and the NOON template. The app will preserve formatting and auto-match headers intelligently.")
+st.write("Upload your Amazon source data and the NOON template. This version includes Fuzzy Matching and Auto-Bullet Splitting.")
 
-# Smart matching helper function customized for Amazon -> NOON mapping
 def find_best_match(template_header, source_headers):
     temp_clean = str(template_header).lower().strip()
     
-    # Custom Amazon-to-NOON Dictionary Map
+    # Custom Dictionary
     custom_mapping = {
         "partner sku unique": ["asin", "item model number", "item_sku", "sku"],
         "brand": ["brand"],
         "product title en": ["title", "item_name", "product name"],
         "long description en": ["product description", "description"],
-        "image url 1": ["image 1", "main_image_url", "main image"],
+        "image url 1": ["image 1", "main_image_url"],
         "image url 2": ["image 2", "other_image_url1"],
         "image url 3": ["image 3", "other_image_url2"],
         "image url 4": ["image 4", "other_image_url3"],
@@ -30,19 +31,22 @@ def find_best_match(template_header, source_headers):
         "model": ["model", "item model number"]
     }
     
-    # 1. Check dictionary first
+    # 1. Dictionary Match
     if temp_clean in custom_mapping:
-        possible_amazon_names = custom_mapping[temp_clean]
+        possible_names = custom_mapping[temp_clean]
         for src in source_headers:
-            if str(src).lower().strip() in possible_amazon_names:
+            if str(src).lower().strip() in possible_names:
                 return src
 
-    # 2. Exact match check
-    for src in source_headers:
-        if temp_clean == str(src).lower().strip():
-            return src
+    source_headers_lower = [str(s).lower().strip() for s in source_headers]
+
+    # 2. Fuzzy Matching (Finds closest match with at least 80% similarity)
+    close_matches = difflib.get_close_matches(temp_clean, source_headers_lower, n=1, cutoff=0.8)
+    if close_matches:
+        match_index = source_headers_lower.index(close_matches[0])
+        return source_headers[match_index]
             
-    # 3. Partial keyword match check
+    # 3. Keyword Match (Fallback)
     for src in source_headers:
         src_clean = str(src).lower().strip()
         if (src_clean in temp_clean or temp_clean in src_clean) and len(src_clean) > 4:
@@ -50,7 +54,6 @@ def find_best_match(template_header, source_headers):
             
     return None
 
-# File uploaders
 col1, col2 = st.columns(2)
 with col1:
     source_file = st.file_uploader("1. Upload Amazon Data (Excel/CSV)", type=["csv", "xlsx"])
@@ -59,7 +62,6 @@ with col2:
 
 if source_file and template_file:
     try:
-        # Load source data
         if source_file.name.endswith('.csv'):
             df_source = pd.read_csv(source_file)
         else:
@@ -67,11 +69,9 @@ if source_file and template_file:
             
         source_headers = list(df_source.columns)
 
-        # Load NOON template preserving formatting
         wb = openpyxl.load_workbook(template_file)
         sheet = wb.active 
         
-        # Extract headers exactly from Row 8
         template_headers = []
         header_col_map = {} 
         
@@ -87,16 +87,12 @@ if source_file and template_file:
 
         st.divider()
         st.subheader("Column Mapping")
-        st.write("Headers mapped automatically based on Amazon structure. Please review before generating.")
         
         mapping = {}
         source_options = ["--- Leave Empty ---"] + source_headers
         
-        # Create mapping interface with Smart Matching
         for header in template_headers:
             default_index = 0
-            
-            # Find the best match
             best_match = find_best_match(header, source_headers)
             if best_match:
                 default_index = source_options.index(best_match)
@@ -112,25 +108,48 @@ if source_file and template_file:
             else:
                 mapping[header] = None
 
-        # Generate the final file
         if st.button("Generate NOON Sheet", type="primary"):
-            # Start writing data at row 10 to preserve hidden row 9
             start_row = 10
             
             for index, row_data in df_source.iterrows():
                 current_row = start_row + index
                 
+                # --- SMART BULLET SPLITTING LOGIC ---
+                # Check if Amazon's 'About This Item' is present in this row
+                amazon_bullets = ""
+                if "About This Item" in source_headers:
+                    val = row_data["About This Item"]
+                    if not pd.isna(val):
+                        amazon_bullets = str(val)
+                
+                # Split the text by semicolons or line breaks
+                bullet_list = re.split(r';|\n', amazon_bullets)
+                bullet_list = [b.strip() for b in bullet_list if b.strip()] # Clean empty strings
+                
                 for temp_header, source_col in mapping.items():
+                    col_idx = header_col_map[temp_header]
+                    val = ""
+                    
                     if source_col: 
-                        col_idx = header_col_map[temp_header]
                         val = row_data[source_col]
-                        
                         if pd.isna(val):
                             val = ""
-                            
-                        sheet.cell(row=current_row, column=col_idx, value=val)
+                    
+                    # Intercept bullet points and apply our split list
+                    if "Feature Bullet" in temp_header and "EN" in temp_header:
+                        # Extract the bullet number from the header (e.g., "Feature Bullet 1 EN" -> 1)
+                        bullet_num_match = re.search(r'\d+', temp_header)
+                        if bullet_num_match:
+                            bullet_num = int(bullet_num_match.group())
+                            # If we have enough split bullets, assign it to the right column
+                            if 0 < bullet_num <= len(bullet_list):
+                                val = bullet_list[bullet_num - 1]
+                            else:
+                                val = "" # Leave blank if we run out of bullets
+                                
+                    sheet.cell(row=current_row, column=col_idx, value=val)
             
-            st.success("Data injected successfully!")
+            st.success("Data injected successfully with smart bullet formatting!")
             
             buffer = io.BytesIO()
             wb.save(buffer)
