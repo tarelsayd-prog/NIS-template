@@ -6,18 +6,34 @@ import io
 st.set_page_config(page_title="NOON Template Filler", layout="wide")
 
 st.title("NOON Information Sheet Generator")
-st.write("Upload your source data and the NOON template. The app will preserve all formatting and hidden rows.")
+st.write("Upload your source data and the NOON template. The app will preserve formatting and auto-match headers intelligently.")
+
+# Smart matching helper function
+def find_best_match(template_header, source_headers):
+    temp_clean = str(template_header).lower().strip()
+    
+    # 1. Look for an exact match (ignoring upper/lower case)
+    for src in source_headers:
+        if temp_clean == str(src).lower().strip():
+            return src
+            
+    # 2. Look for keyword matches (e.g., "Color" matches "Product Color")
+    for src in source_headers:
+        src_clean = str(src).lower().strip()
+        if src_clean in temp_clean or temp_clean in src_clean:
+            return src
+            
+    return None
 
 col1, col2 = st.columns(2)
 with col1:
     source_file = st.file_uploader("1. Upload Source Data (Excel/CSV)", type=["csv", "xlsx"])
 with col2:
-    # Template must be Excel to contain hidden rows/formatting
     template_file = st.file_uploader("2. Upload NOON Template (Excel ONLY)", type=["xlsx"])
 
 if source_file and template_file:
     try:
-        # 1. Load the source data
+        # Load source data
         if source_file.name.endswith('.csv'):
             df_source = pd.read_csv(source_file)
         else:
@@ -25,15 +41,15 @@ if source_file and template_file:
             
         source_headers = list(df_source.columns)
 
-        # 2. Load the NOON template using openpyxl to KEEP formatting
+        # Load NOON template
         wb = openpyxl.load_workbook(template_file)
-        sheet = wb.active # Assumes you want to fill the first sheet
+        sheet = wb.active 
         
-        # 3. Extract headers exactly from Row 8
+        # Extract headers from Row 8
         template_headers = []
-        header_col_map = {} # Remembers which column letter each header belongs to
+        header_col_map = {} 
         
-        for cell in sheet[8]: # openpyxl is 1-indexed, so 8 is row 8
+        for cell in sheet[8]: 
             if cell.value:
                 header_name = str(cell.value).strip()
                 template_headers.append(header_name)
@@ -45,16 +61,19 @@ if source_file and template_file:
 
         st.divider()
         st.subheader("Column Mapping")
-        st.write("Headers extracted from **Row 8**. Data will be inserted starting at **Row 10** (preserving hidden row 9).")
+        st.write("Headers mapped automatically based on keywords. Please review before generating.")
         
         mapping = {}
         source_options = ["--- Leave Empty ---"] + source_headers
         
-        # Create mapping interface
+        # Create mapping interface with Smart Matching
         for header in template_headers:
             default_index = 0
-            if header in source_headers:
-                default_index = source_options.index(header)
+            
+            # Use our new function to find the best match
+            best_match = find_best_match(header, source_headers)
+            if best_match:
+                default_index = source_options.index(best_match)
                 
             selected_col = st.selectbox(
                 f"NOON Template Header: **{header}**", 
@@ -67,32 +86,25 @@ if source_file and template_file:
             else:
                 mapping[header] = None
 
-        # 4. Generate the final file
+        # Generate the final file
         if st.button("Generate NOON Sheet", type="primary"):
-            
-            # Start writing data at row 10
             start_row = 10
             
-            # Iterate through source data and write directly into the template cells
             for index, row_data in df_source.iterrows():
                 current_row = start_row + index
                 
                 for temp_header, source_col in mapping.items():
                     if source_col: 
-                        # Get the exact column index for this header
                         col_idx = header_col_map[temp_header]
-                        
-                        # Write the data into the cell
                         val = row_data[source_col]
-                        # Handle pandas NaNs/nulls so they write as blank cells
+                        
                         if pd.isna(val):
                             val = ""
                             
                         sheet.cell(row=current_row, column=col_idx, value=val)
             
-            st.success("Data injected successfully! All formatting and hidden rows are preserved.")
+            st.success("Data injected successfully!")
             
-            # Save the modified template into memory
             buffer = io.BytesIO()
             wb.save(buffer)
             buffer.seek(0)
